@@ -108,18 +108,26 @@ public:
         status = REG_STATUS_STABLE; 
         return 1;                                           //Реле отключено, цикл регулирования завершен
     }
+    //dataToPort(); Вывод данных в порт для графика в Arduino IDE 
     return 1;
-    /*Serial5.print(*_actualVal);
-    Serial5.print(' ');
-    Serial5.print(_setpoint - _hysteresis / 2);
-    Serial5.print(' ');
-    Serial5.print(_setpoint + _hysteresis / 2);
-    Serial5.print(' ');
-    Serial5.print(_setpoint);
-    Serial5.print(' ');
-    Serial5.println(!digitalRead(_relayPin) * _hysteresis + _setpoint - _hysteresis / 2);
-    delay(10);*/
   }
+
+  /**
+   * Вывод данных в порт для графика в Arduino IDE 
+   */
+  void dataToPort (void) {
+    Serial.print(*_actualVal);
+    Serial.print(' ');
+    Serial.print(_setpoint - _hysteresis / 2);
+    Serial.print(' ');
+    Serial.print(_setpoint + _hysteresis / 2);
+    Serial.print(' ');
+    Serial.print(_setpoint);
+    Serial.print(' ');
+    Serial.println(!digitalRead(_relayPin) * _hysteresis + _setpoint - _hysteresis / 2);
+    delay(10);
+  }
+ 
   /**
    * Вычисление добавки к сигналу для регулирования инерционных сисием
    * Если заданы коэф. и интервал, то ускорить срабатывание реле путем добавки к сигналу значения, пропорционального скорости изменения сигнала
