@@ -256,6 +256,10 @@ public:
     return mode;
   }
 
+  int isRelayOn () {
+    return digitalRead(_relayPin);
+  }
+
   int getError () {
     return error;
   }
