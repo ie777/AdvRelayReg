@@ -18,25 +18,36 @@
   #define _GPIO_REG_TYPE   uint32_t
 #endif
 
+//Направление регулирования 
 enum regDirection {
-  REG_DIR_NORMAL = 0,  //Включаем нагрузку при переходе через значение снизу (пример: охлаждение)
-  REG_DIR_REVERS       //Включаем нагрузку при переходе через значение сверху (пример: нагрев)
+  REG_DIR_NORMAL = 0,  //Включаем нагрузку при переходе через уст. значение сверху (пример: нагрев)
+  REG_DIR_REVERS       //Включаем нагрузку при переходе через уст. значение снизу (пример: охлаждение)
 };
 
+//Режим регулирования
 enum regMode {
-  REG_MODE_OFF = 0,  
-  REG_MODE_ONCE,
-  REG_MODE_CONTINIOUS
+  REG_MODE_OFF = 0,     //Отключено
+  REG_MODE_CONTINIOUS,  //Постоянный - поддержание заданного значения
+  REG_MODE_ONCE         //Единоразовый - достичь заданной точки и отключиться (пример: вскипятить бойлер)
 };
 
+//Тип гистерезиса
+enum regHystType {
+  REG_HYST_NORMAL = 0,  //Гистерезис по краю установленного значения (пример: остыли до уст. значения - включается нагрев до превышения гистерезиса)
+  REG_HYST_MIDDLE       //Гистерезис по середине установленного значения (пример: остыли до уст. значения минус 1/2гист.- включается нагрев до превышения 1/2гист.)
+};
+
+//Текущее состояние процесса
 enum regStatus {
-  REG_STATUS_TRANSIENT = 0,   //Процесс идет к целевой точке (напр., нагрев)
-  REG_STATUS_STABLE           //Процесс достиг целевой точки (напр., остывание) 
+  REG_STATUS_TRANSIENT = 0,   //Процесс вне диапазона заданного значения и гистирезиса 
+  REG_STATUS_STABLE           //Процесс внутри диапазона заданного значения и гистирезиса 
 };
 
+//Ошибка
 enum regErrorStatus {
   REG_ERROR_OK,
-  REG_ERROR_OVERTIME
+  REG_ERROR_OVERTIME,   //Превышено заданное время за которое значение так и не было достигнуто
+  REG_ERROR_VALUE       //Входное значение не число (NAN)
 };
 
 class AdvRelayReg 
@@ -50,17 +61,45 @@ public:
  * коэффициент и время выборки для улучшеного регулирования инерционных систем (подбирается индивидуально)
  * Таймаут, в течение которого процесс должен достичь целевой точки, для констатации ошибки в случае недостижения ( 0 - не проверять ошибку)
 */
-  AdvRelayReg (_GPIO_REG_TYPE relayPin, float *actualVal, float hysteresis, bool dir = REG_DIR_NORMAL, float k = 0, float dtSec = 0, uint16_t timeoutSec = 0)
+  AdvRelayReg (_GPIO_REG_TYPE relayPin, float *actualVal, float hysteresis = 1, bool dir = REG_DIR_NORMAL, int hystType = REG_HYST_NORMAL, float k = 0, float dtSec = 0, uint16_t timeoutSec = 0)
   {
     _relayPin = relayPin;
     _actualVal = actualVal;
     _dir = dir;
     _hysteresis = hysteresis;
+    _hystType = hystType;
     _k = k;
     _dtSec = dtSec;
     _timeout = timeoutSec;
     pinMode(_relayPin, OUTPUT);
     digitalWrite(_relayPin, LOW);
+  }
+
+  /**
+   * Вычисление диапазона значений сигнала с учетем гистирезиса
+   */
+  void calcSignalRange () {
+  //Вычисляем макс. и мин. значения с учетом гистерезиса
+    if (_dir == REG_DIR_NORMAL) {
+      if (_hystType == REG_HYST_NORMAL) { 
+        sigMin = _setpoint; 
+        sigMax = _setpoint + _hysteresis; 
+      }
+      else if (_hystType == REG_HYST_MIDDLE)  { 
+        sigMin = _setpoint - _hysteresis / 2; 
+        sigMax = _setpoint + _hysteresis / 2;
+      }
+    }
+    else if (_dir == REG_DIR_REVERS) {
+      if (_hystType == REG_HYST_NORMAL) { 
+        sigMin = _setpoint - _hysteresis; 
+        sigMax = _setpoint; 
+      }
+      else if (_hystType == REG_HYST_MIDDLE)  { 
+        sigMin = _setpoint - _hysteresis / 2; 
+        sigMax = _setpoint + _hysteresis / 2;
+      }
+    }
   }
 
   /**
@@ -73,41 +112,52 @@ public:
 
     errorCheck();
 
+    //Валидность данных
+    if(isnan(*_actualVal)) {  //Если не число 
+      relayOff(); 
+      mode = REG_MODE_OFF;              //Завершить регулирование 
+      status = REG_STATUS_TRANSIENT;    //Статус стабильно
+      return 1;                         //Реле отключено, процесс окончен
+    }
+
+    //Режим
     switch (mode) {
       //Режим выключено
       case REG_MODE_OFF: 
         return 1;  
-      
+
+      //Режим постоянной работы   
+      case REG_MODE_CONTINIOUS:  
+        calcSignalRange();         //Вычислить диапазон допустимых значений сигнала в соответствии с гистерезисом
+        if ( _dir == REG_DIR_NORMAL )  {        //Прямое
+          if (signal < sigMin)   relayOn();     //Показания понизились     
+          if (signal > sigMax)   relayOff();    //Показания повысились      
+          status = REG_STATUS_TRANSIENT;        //Вне диапазона
+          return 0;
+        }
+        else if ( _dir == REG_DIR_REVERS )  {   //Обратное
+          if (signal > sigMax)   relayOn();     //Показания понизились     
+          if (signal < sigMin)   relayOff();    //Показания повысились      
+          status = REG_STATUS_TRANSIENT;        //Вне диапазона
+          return 0;
+        }
+        status = REG_STATUS_STABLE; 
+        return 1;                               //Реле отключено, сигнал внутри диапазона
+
       //Режим единоразовой работы 
       case REG_MODE_ONCE:   
         //Если показания не достигли целевой точки
         if ((_dir == REG_DIR_NORMAL  &&  signal < _setpoint)  ||  (_dir == REG_DIR_REVERS  &&  signal > _setpoint))  {  
-          relOn();        //Включать реле
+          relayOn();        //Включать реле
           status = REG_STATUS_TRANSIENT;
           return 0;       //Переходный процесс
         }
-        relOff(); 
+        relayOff(); 
         mode = REG_MODE_OFF;          //Завершить регулирование 
         status = REG_STATUS_STABLE;   //Статус стабильно
         return 1;                     //Реле отключено, процесс окончен
       
-      //Режим постоянной работы   
-      case REG_MODE_CONTINIOUS:       
-        if (signal < _setpoint - _hysteresis / 2) {         //Показания понизились
-          if (_dir == REG_DIR_NORMAL)   relOn();            //Отработать реле в зависимости от режима
-          else                          relOff();   
-          status = REG_STATUS_TRANSIENT;
-          return 0;                                         //Реле сработано, идет процесс регулирования
-        }
-        else if (signal > _setpoint + _hysteresis / 2) {    //Показания повысились
-          if (_dir == REG_DIR_NORMAL)   relOff();            //Отработать реле в зависимости от режима
-          else                          relOn();            
-          status = REG_STATUS_TRANSIENT; 
-          return 0;                                         //Реле сработано, идет процесс регулирования
-        }
-        status = REG_STATUS_STABLE; 
-        return 1;                                           //Реле отключено, цикл регулирования завершен
-    }
+      }
     //dataToPort(); Вывод данных в порт для графика в Arduino IDE 
     return 1;
   }
@@ -182,6 +232,10 @@ public:
     _setpoint = setpoint;
   }  
 
+  void setHyst (float hyst) {
+    _hysteresis = hyst;
+  }  
+
   void setKoeff (float k) {
     _k = k;
   }
@@ -190,11 +244,11 @@ public:
     _dtSec = dtSec;
   }  
 
-  void relOn() {
+  void relayOn() {
     digitalWrite(_relayPin, HIGH);
   }
 
-  void relOff() {
+  void relayOff() {
     digitalWrite(_relayPin, LOW);
   }
 
@@ -206,6 +260,14 @@ public:
     mode = REG_MODE_CONTINIOUS;
   }
 
+  /**
+   * Запуск работы с указанием целевого значения, при этом функция tick должна постоянно вызываться в цикле
+  */
+  void start(float setpoint, float hysteresis) {
+    _setpoint = setpoint;
+    _hysteresis = hysteresis;
+    mode = REG_MODE_CONTINIOUS;
+  }
   /**
    * Запуск без параметров, должны быть заданы ранее
   */  
@@ -230,7 +292,7 @@ public:
   */
   void stop() {
     mode = REG_MODE_OFF;
-    relOff();
+    relayOff();
   }
 
   /**
@@ -271,6 +333,7 @@ public:
   bool _dir;
   float _setpoint;
   float _hysteresis;
+  int _hystType;
   float _k;
   float _dtSec;
   float *_actualVal;
@@ -284,4 +347,5 @@ private:
   uint32_t tmr;
   int mode = 0;
   int status = 0;
+  float sigMin, sigMax;
 };
